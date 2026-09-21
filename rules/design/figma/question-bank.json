@@ -1,0 +1,358 @@
+{
+  "version": 1,
+  "title": "React Native feature Q&A bank",
+  "purpose": "Canonical question set the react-native-prompt-creator skill walks. Evaluate each question's ask_if against the node(s) + prior answers, collect answers, and emit a plain-text # FEATURE SPEC (format: feature-spec-template.md; NO JSON). Pasting that text into /tllq-workflow:feature lets Claude build with zero guessing. prompt_field names the spec section an answer fills.",
+  "notes": [
+    "ask_if.node predicates are evaluated against each Figma node (get_node output). ask_if.when predicates are evaluated against already-collected answers.",
+    "per_node:true questions are asked once for EACH matching node; per_node:false (default) once per feature.",
+    "answer lands at prompt_field, a JSON path into the FEATURE SPEC ([] = array item for the current node).",
+    "candidates_source questions must be populated from a real lookup, never free-typed guesses.",
+    "required questions with no answer keep the spec incomplete -> spec.open[] is non-empty -> build is NOT deterministic; the gate must refuse or ask."
+  ],
+  "candidate_sources": {
+    "openapi.specs": "openapi MCP get-api-catalog (scope {projectId, repoId}) -> spec names",
+    "openapi.operations": "openapi MCP search-api-operations {spec, query} where query = keywords from the screen + layer name; present the TOP matches as options + 'none/other' and let the junior confirm which API is correct (never assume the first hit, never make them type an operationId)",
+    "openapi.response_fields": "openapi MCP load-api-operation-by-operationId {operationId} -> response schema field names",
+    "codegraph.screens": "codebase-memory search_graph {label: 'Screen'} -> Screen function-component names",
+    "codegraph.symbol": "codebase-memory search_graph {qn_pattern} -> verify a named type/method exists"
+  },
+  "node_predicates": {
+    "_comment": "Vocabulary a tool can evaluate against one Figma node to classify it. itz_<Component> is the literal React Native component name (PascalCase) — no separate lookup table, see itz-mapping.md.",
+    "isItz": "name matches ^itz_[A-Za-z][A-Za-z0-9]*\\[.*\\]$ or ^itz_[A-Za-z][A-Za-z0-9]*$",
+    "itzBindingData": "name matches ^itz_[A-Za-z][A-Za-z0-9]*\\[data\\..+\\]$",
+    "itzBindingStatic": "name matches ^itz_[A-Za-z][A-Za-z0-9]*\\[[^\\].]+\\]$ (bracket is a plain key, no leading 'data.')",
+    "itzHintOnly": "name matches ^itz_[A-Za-z][A-Za-z0-9]*(\\[\\])?$ (empty or no bracket)",
+    "itzInteractive": "itz Component in [Button, Toggle, Switch, Slider, Picker, TextField, CheckboxView, RadioButtonView] OR (CardView|Image|TouchableOpacity|a FlatList row marked clickable)",
+    "isList": "name matches ^itz_(FlatList|SectionList)(\\[.*\\])?$",
+    "isStructuralContainer": "type in [FRAME, GROUP] AND has children AND has no own characters AND not isItz AND not inSkipList",
+    "inSkipList": "name matches (?i)(status ?bar|notch|dynamic island|wifi|battery|indicator|home indicator|time\\b|status icons) OR is a decorative VECTOR inside an illustration frame",
+    "isBlocking": "not isItz AND not isStructuralContainer AND not inSkipList AND (has characters OR looks interactive) AND not inside a leaf itz_ component",
+    "leafItz": "isItz AND Component in [Text, TextField, Button, Image, RemoteImage, Toggle, Switch, CheckboxView, RadioButtonView, Picker, LoadingIndicator, Slider, RatingView, WebView] — do NOT descend into its children; they are the component's own label/placeholder/icon",
+    "containerItz": "isItz AND Component in [FlatList, SectionList, ScrollView, CardView, ChipGroup, View, TouchableOpacity] — DO descend; children are real components (FlatList children = the row template)"
+  },
+  "questions": [
+    {
+      "id": "screen.feature_name",
+      "scope": "screen",
+      "ask_if": {},
+      "question": "Feature name (kebab-case, becomes the type/file base)?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "feature",
+      "help": "e.g. order-list -> OrderListScreen/ViewModel, OrderListScreen.tsx"
+    },
+    {
+      "id": "screen.goal",
+      "scope": "screen",
+      "ask_if": {},
+      "question": "Goal in one sentence?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "goal"
+    },
+    {
+      "id": "screen.request_type",
+      "scope": "screen",
+      "ask_if": {},
+      "question": "What kind of work is this?",
+      "answer_type": "single",
+      "options": ["new_screen_from_design", "api_only", "edit", "bug"],
+      "required": true,
+      "prompt_field": "request_type"
+    },
+    {
+      "id": "screen.figma_provided",
+      "scope": "screen",
+      "ask_if": { "when": { "eq": ["request_type", "new_screen_from_design"] } },
+      "question": "Is a Figma frame provided for this feature?",
+      "answer_type": "yesno",
+      "required": true,
+      "prompt_field": "figma.provided"
+    },
+    {
+      "id": "screen.figma_connected",
+      "scope": "screen",
+      "ask_if": { "when": { "eq": ["figma.provided", true] } },
+      "question": "Figma MCP connected? (verify with get_selection / list_files)",
+      "answer_type": "yesno",
+      "required": true,
+      "prompt_field": "figma.connected",
+      "blocking_on": { "value": false, "message": "Connect the figma-bridge MCP before continuing." }
+    },
+    {
+      "id": "screen.confirm_selection",
+      "scope": "screen",
+      "ask_if": { "when": { "eq": ["figma.connected", true] } },
+      "question": "Implement the currently selected frame ({selectionName})? The selection may not be the intended node.",
+      "answer_type": "yesno",
+      "required": true,
+      "prompt_field": "figma.selectionConfirmed",
+      "help": "no -> ask for the intended node (re-select or paste node-id), fetch it, confirm again."
+    },
+    {
+      "id": "screen.node_id",
+      "scope": "screen",
+      "ask_if": { "when": { "eq": ["figma.selectionConfirmed", false] } },
+      "question": "Which node then? Select the intended frame and re-run get_selection, or paste its node-id.",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "figma.nodeId"
+    },
+    {
+      "id": "screen.type",
+      "scope": "screen",
+      "ask_if": { "when": { "eq": ["request_type", "new_screen_from_design"] } },
+      "question": "Present this screen pushed onto the stack, or as a modal?",
+      "answer_type": "single",
+      "options": ["pushed", "modal"],
+      "required": true,
+      "prompt_field": "screen.type",
+      "help": "pushed -> native-stack destination (default, drill-in flow); modal -> route registered with presentation: 'modal' (dismissible overlay, onboarding/picker-style)."
+    },
+    {
+      "id": "screen.device",
+      "scope": "screen",
+      "ask_if": {},
+      "question": "Device target?",
+      "answer_type": "single",
+      "options": ["ios", "android", "both"],
+      "required": true,
+      "prompt_field": "device"
+    },
+    {
+      "id": "screen.entry_point",
+      "scope": "screen",
+      "ask_if": { "when": { "in": ["request_type", ["new_screen_from_design", "edit"]] } },
+      "question": "Entry point — where is this screen launched from?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "entry_point"
+    },
+    {
+      "id": "screen.openapi_specs",
+      "scope": "screen",
+      "ask_if": { "when": { "in": ["request_type", ["new_screen_from_design", "api_only", "edit"]] } },
+      "question": "Which OpenAPI spec(s) does this feature use?",
+      "answer_type": "candidates",
+      "candidates_source": "openapi.specs",
+      "multi": true,
+      "required": true,
+      "prompt_field": "openapi"
+    },
+
+    {
+      "id": "comp.binding_operation",
+      "scope": "component",
+      "per_node": true,
+      "ask_if": { "node": "itzBindingData" },
+      "question": "{layer}: which operation supplies this data?",
+      "answer_type": "candidates",
+      "candidates_source": "openapi.operations",
+      "required": true,
+      "prompt_field": "components[].binding.operation"
+    },
+    {
+      "id": "comp.binding_field",
+      "scope": "component",
+      "per_node": true,
+      "ask_if": { "node": "itzBindingData" },
+      "question": "{layer}: which response field binds here? (bracket says data.{suffix} — confirm, resolve ambiguity like price vs salePrice)",
+      "answer_type": "candidates",
+      "candidates_source": "openapi.response_fields",
+      "required": true,
+      "prompt_field": "components[].binding.field"
+    },
+    {
+      "id": "comp.static_confirm",
+      "scope": "component",
+      "per_node": true,
+      "ask_if": { "node": "itzBindingStatic" },
+      "question": "{layer}: static string — key '{key}', value '{text}'. Correct?",
+      "answer_type": "yesno",
+      "required": true,
+      "prompt_field": "components[].static.confirmed",
+      "help": "Value goes to app/i18n/en.ts (+ vi.ts) per react-native-strings (prefix by screen)."
+    },
+    {
+      "id": "comp.action",
+      "scope": "action",
+      "per_node": true,
+      "ask_if": { "node": "itzInteractive" },
+      "question": "{layer}: on click / interaction, what happens?",
+      "answer_type": "single",
+      "options": ["navigate", "call_api", "dismiss", "toggle", "custom"],
+      "required": true,
+      "prompt_field": "components[].action.type"
+    },
+    {
+      "id": "comp.action_navigate_dest",
+      "scope": "action",
+      "per_node": true,
+      "ask_if": { "node": "itzInteractive", "when": { "eq": ["components[].action.type", "navigate"] } },
+      "question": "{layer}: navigate to which Screen?",
+      "answer_type": "candidates",
+      "candidates_source": "codegraph.screens",
+      "required": true,
+      "prompt_field": "components[].action.dest"
+    },
+    {
+      "id": "comp.action_navigate_args",
+      "scope": "action",
+      "per_node": true,
+      "ask_if": { "node": "itzInteractive", "when": { "eq": ["components[].action.type", "navigate"] } },
+      "question": "{layer}: navigation params (name=field, e.g. orderId=id)? blank if none",
+      "answer_type": "text",
+      "required": false,
+      "prompt_field": "components[].action.args"
+    },
+    {
+      "id": "comp.action_api_operation",
+      "scope": "action",
+      "per_node": true,
+      "ask_if": { "node": "itzInteractive", "when": { "eq": ["components[].action.type", "call_api"] } },
+      "question": "{layer}: which operation does it call?",
+      "answer_type": "candidates",
+      "candidates_source": "openapi.operations",
+      "required": true,
+      "prompt_field": "components[].action.operation"
+    },
+    {
+      "id": "comp.action_custom",
+      "scope": "action",
+      "per_node": true,
+      "ask_if": { "node": "itzInteractive", "when": { "eq": ["components[].action.type", "custom"] } },
+      "question": "{layer}: describe the custom behavior exactly.",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "components[].action.custom"
+    },
+
+    {
+      "id": "list.source_operation",
+      "scope": "list",
+      "per_node": true,
+      "ask_if": { "node": "isList" },
+      "question": "{layer}: which operation returns the list items?",
+      "answer_type": "candidates",
+      "candidates_source": "openapi.operations",
+      "required": true,
+      "prompt_field": "components[].binding.operation"
+    },
+    {
+      "id": "list.row_fields",
+      "scope": "list",
+      "per_node": true,
+      "ask_if": { "node": "isList" },
+      "question": "{layer}: confirm each row field maps its child itz_ layer to a response field (correct any).",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "components[].row_fields",
+      "help": "Children itz_ layers of the row template = the row's bound fields."
+    },
+    {
+      "id": "list.item_tap",
+      "scope": "list",
+      "per_node": true,
+      "ask_if": { "node": "isList" },
+      "question": "{layer}: on item tap?",
+      "answer_type": "single",
+      "options": ["navigate_detail", "select", "expand", "none"],
+      "required": true,
+      "prompt_field": "components[].item_tap.action"
+    },
+    {
+      "id": "list.item_tap_arg",
+      "scope": "list",
+      "per_node": true,
+      "ask_if": { "node": "isList", "when": { "eq": ["components[].item_tap.action", "navigate_detail"] } },
+      "question": "{layer}: which id field is the navigation param, and to which Screen?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "components[].item_tap.dest_and_arg"
+    },
+    {
+      "id": "list.pagination",
+      "scope": "list",
+      "per_node": true,
+      "ask_if": { "node": "isList" },
+      "question": "{layer}: paging / refresh?",
+      "answer_type": "single",
+      "options": ["none", "paged", "pull_refresh", "paged+pull_refresh"],
+      "required": true,
+      "prompt_field": "components[].pagination",
+      "help": "paged -> onEndReached; pull_refresh -> RefreshControl / FlatList's refreshing+onRefresh."
+    },
+
+    {
+      "id": "api.request_params",
+      "scope": "api",
+      "per_node": false,
+      "ask_if": { "when": { "in": ["request_type", ["new_screen_from_design", "api_only", "edit"]] } },
+      "question": "For each operation used: where does each request param come from?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "api.request_params"
+    },
+    {
+      "id": "api.error_behavior",
+      "scope": "api",
+      "per_node": false,
+      "ask_if": { "when": { "in": ["request_type", ["new_screen_from_design", "api_only", "edit"]] } },
+      "question": "Per-error-code behavior? (e.g. 401 -> relogin, else alert+retry)",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "api.error_behavior"
+    },
+
+    {
+      "id": "edit.target",
+      "scope": "edit",
+      "ask_if": { "when": { "eq": ["request_type", "edit"] } },
+      "question": "Which type/screen to edit? (verified in the code graph)",
+      "answer_type": "candidates",
+      "candidates_source": "codegraph.symbol",
+      "required": true,
+      "prompt_field": "edit.target"
+    },
+    {
+      "id": "edit.changes",
+      "scope": "edit",
+      "ask_if": { "when": { "eq": ["request_type", "edit"] } },
+      "question": "What changes?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "edit.changes"
+    },
+    {
+      "id": "edit.keep",
+      "scope": "edit",
+      "ask_if": { "when": { "eq": ["request_type", "edit"] } },
+      "question": "Keep-unchanged list — what must NOT change?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "edit.keep_unchanged"
+    },
+
+    {
+      "id": "bug.repro",
+      "scope": "bug",
+      "ask_if": { "when": { "eq": ["request_type", "bug"] } },
+      "question": "Repro steps · expected vs actual · device/OS version · logs?",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "bug"
+    },
+
+    {
+      "id": "blocking.unnamed",
+      "scope": "blocking",
+      "per_node": true,
+      "ask_if": { "node": "isBlocking" },
+      "question": "{layer} carries text/action but is not named itz_*. Enforce-itz_: rename it in Figma, or state what it is (component + binding + action). It cannot be guessed.",
+      "answer_type": "text",
+      "required": true,
+      "prompt_field": "blocking[]",
+      "blocking": true
+    }
+  ]
+}
